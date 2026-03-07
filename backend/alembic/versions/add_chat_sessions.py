@@ -18,9 +18,19 @@ def upgrade() -> None:
         sa.Column("agent_id", sa.dialects.postgresql.UUID(as_uuid=True), sa.ForeignKey("agents.id"), nullable=False, index=True),
         sa.Column("user_id", sa.dialects.postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=False, index=True),
         sa.Column("title", sa.String(200), nullable=False, server_default="New Session"),
+        sa.Column("source_channel", sa.String(20), nullable=False, server_default="web"),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), index=True),
         sa.Column("last_message_at", sa.DateTime(timezone=True), nullable=True),
     )
+
+    # For existing installs where chat_sessions already exists (without source_channel)
+    conn = op.get_bind()
+    try:
+        conn.execute(sa.text(
+            "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS source_channel VARCHAR(20) NOT NULL DEFAULT 'web'"
+        ))
+    except Exception:
+        pass  # Table didn't exist yet (handled by create_table above)
 
     # Migrate existing messages: for each unique (agent_id, user_id, old_conv_id) combo,
     # create a chat_session and update conversation_id on messages.

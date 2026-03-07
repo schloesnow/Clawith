@@ -184,6 +184,11 @@ async def feishu_event_webhook(
 
         print(f"[Feishu] Received {msg_type} message, chat_type={chat_type}, from={sender_open_id}")
 
+        if msg_type in ("file", "image"):
+            import asyncio as _asyncio
+            _asyncio.create_task(_handle_feishu_file(db, agent_id, config, message, sender_open_id, chat_type, chat_id))
+            return {"code": 0, "msg": "ok"}
+
         if msg_type == "text":
             import json
             import re
@@ -332,8 +337,22 @@ async def feishu_event_webhook(
                 id_part = f" (ID: {sender_user_id_feishu})" if sender_user_id_feishu else ""
                 llm_user_text = f"[发送者: {sender_name}{id_part}] {user_text}"
 
+            # Set channel_file_sender contextvar so the agent can send files back via Feishu
+            from app.services.agent_tools import channel_file_sender as _cfs
+            _reply_to_id = chat_id if chat_type == "group" else sender_open_id
+            _rid_type = "chat_id" if chat_type == "group" else "open_id"
+            async def _feishu_file_sender(file_path, msg: str = ""):
+                await feishu_service.upload_and_send_file(
+                    config.app_id, config.app_secret,
+                    _reply_to_id, file_path,
+                    receive_id_type=_rid_type,
+                    accompany_msg=msg,
+                )
+            _cfs_token = _cfs.set(_feishu_file_sender)
+
             # Call LLM with history
             reply_text = await _call_agent_llm(db, agent_id, llm_user_text, history=history)
+            _cfs.reset(_cfs_token)
             print(f"[Feishu] LLM reply: {reply_text[:100]}")
 
             # Log activity
@@ -394,6 +413,129 @@ async def feishu_event_webhook(
                 print(f"[Feishu] Failed to send message: {e}")
 
     return {"code": 0, "msg": "ok"}
+
+
+IMPORT_RE = None  # lazy sentinel
+_FILE_ACK_MESSAGES = [
+    "收到你的文件，请问有什么需要帮忙的？",
+    "文件收到了！你想让我怎么处理它？",
+    "好的，我已经收到这份文件，请告诉我你的需求~",
+    "已收到文件，随时准备好为你处理！",
+    "收到！请问希望我对这份文件做什么？",
+]
+
+
+async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, chat_type, chat_id):
+    """Handle incoming file or image messages from Feishu."""
+    import asyncio, random, json, re
+    from pathlib import Path
+    from app.models.audit import ChatMessage
+    from app.models.agent import Agent as AgentModel
+    from app.models.user import User as UserModel
+    from app.services.channel_session import find_or_create_channel_session
+    from app.core.security import hash_password
+    from datetime import datetime as _dt, timezone as _tz
+    import uuid as _uuid
+
+    msg_type = message.get("message_type", "file")
+    message_id = message.get("message_id", "")
+    content = json.loads(message.get("content", "{}"))
+
+    # Extract file key and name
+    if msg_type == "image":
+        file_key = content.get("image_key", "")
+        filename = f"image_{file_key[-8:]}.jpg" if file_key else "image.jpg"
+        res_type = "image"
+    else:
+        file_key = content.get("file_key", "")
+        filename = content.get("file_name") or f"file_{file_key[-8:]}.bin"
+        res_type = "file"
+
+    if not file_key:
+        print(f"[Feishu] No file_key in {msg_type} message")
+        return
+
+    # Resolve workspace upload dir
+    settings = get_settings()
+    upload_dir = Path(settings.AGENT_DATA_DIR) / str(agent_id) / "workspace" / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    save_path = upload_dir / filename
+
+    # Download the file
+    try:
+        file_bytes = await feishu_service.download_message_resource(
+            config.app_id, config.app_secret, message_id, file_key, res_type
+        )
+        save_path.write_bytes(file_bytes)
+        print(f"[Feishu] Saved {msg_type} to {save_path} ({len(file_bytes)} bytes)")
+    except Exception as e:
+        print(f"[Feishu] Failed to download {msg_type}: {e}")
+        return
+
+    # Resolve platform user
+    agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+    agent_obj = agent_r.scalar_one_or_none()
+    fallback_user_id = agent_obj.creator_id if agent_obj else agent_id
+
+    _un = f"feishu_{sender_open_id[:16]}"
+    _ur = await db.execute(select(UserModel).where(UserModel.username == _un))
+    _pu = _ur.scalar_one_or_none()
+    if not _pu:
+        _pu = UserModel(
+            username=_un, email=f"{_un}@feishu.local",
+            password_hash=hash_password(_uuid.uuid4().hex),
+            display_name=f"Feishu {sender_open_id[:8]}",
+            role="member", feishu_open_id=sender_open_id,
+            tenant_id=agent_obj.tenant_id if agent_obj else None,
+        )
+        db.add(_pu)
+        await db.flush()
+    platform_user_id = _pu.id
+
+    # Conv ID
+    if chat_type == "group" and chat_id:
+        conv_id = f"feishu_group_{chat_id}"
+    else:
+        conv_id = f"feishu_p2p_{sender_open_id}"
+
+    # Find-or-create session
+    _sess = await find_or_create_channel_session(
+        db=db, agent_id=agent_id, user_id=platform_user_id,
+        external_conv_id=conv_id, source_channel="feishu",
+        first_message_title=f"[文件] {filename}",
+    )
+    session_conv_id = str(_sess.id)
+
+    # Store user message as file path
+    user_msg_content = f"[文件已上传: workspace/uploads/{filename}]"
+    db.add(ChatMessage(agent_id=agent_id, user_id=platform_user_id, role="user",
+                       content=user_msg_content, conversation_id=session_conv_id))
+    _sess.last_message_at = _dt.now(_tz.utc)
+    await db.commit()
+
+    # Wait 1-2s for "human feel"
+    await asyncio.sleep(random.uniform(1.0, 2.0))
+
+    # Send random ack
+    ack = random.choice(_FILE_ACK_MESSAGES)
+    db.add(ChatMessage(agent_id=agent_id, user_id=platform_user_id, role="assistant",
+                       content=ack, conversation_id=session_conv_id))
+    await db.commit()
+
+    # Send ack via Feishu
+    try:
+        if chat_type == "group" and chat_id:
+            await feishu_service.send_message(
+                config.app_id, config.app_secret, chat_id, "text",
+                json.dumps({"text": ack}), receive_id_type="chat_id",
+            )
+        else:
+            await feishu_service.send_message(
+                config.app_id, config.app_secret, sender_open_id, "text",
+                json.dumps({"text": ack}),
+            )
+    except Exception as e:
+        print(f"[Feishu] Failed to send ack: {e}")
 
 
 async def _call_agent_llm(db: AsyncSession, agent_id: uuid.UUID, user_text: str, history: list[dict] | None = None) -> str:

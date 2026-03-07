@@ -214,6 +214,8 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
             tools_for_llm = await get_agent_tools_for_llm(agent_id)
 
             reply = ""
+            plaza_posts_made = 0       # hard limit: 1 new post per heartbeat
+            plaza_comments_made = 0    # hard limit: 2 comments per heartbeat
             for round_i in range(20):  # More rounds for search + write + plaza
                 payload = {
                     "model": model.model,
@@ -248,7 +250,23 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
                             args = _json.loads(fn["arguments"])
                         except Exception:
                             args = {}
-                        tool_result = await execute_tool(fn["name"], args, agent_id, agent.creator_id)
+
+                        # ── Hard rate limits for plaza actions ──
+                        if fn["name"] == "plaza_create_post":
+                            if plaza_posts_made >= 1:
+                                tool_result = "[BLOCKED] You have already made 1 plaza post this heartbeat. Do not post again."
+                            else:
+                                tool_result = await execute_tool(fn["name"], args, agent_id, agent.creator_id)
+                                plaza_posts_made += 1
+                        elif fn["name"] == "plaza_add_comment":
+                            if plaza_comments_made >= 2:
+                                tool_result = "[BLOCKED] You have already made 2 comments this heartbeat. Do not comment again."
+                            else:
+                                tool_result = await execute_tool(fn["name"], args, agent_id, agent.creator_id)
+                                plaza_comments_made += 1
+                        else:
+                            tool_result = await execute_tool(fn["name"], args, agent_id, agent.creator_id)
+
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc["id"],

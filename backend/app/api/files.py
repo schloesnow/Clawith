@@ -6,6 +6,7 @@ from pathlib import Path
 
 import aiofiles
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.config import get_settings
@@ -100,6 +101,21 @@ async def read_file(
     async with aiofiles.open(target, "r", encoding="utf-8") as f:
         content = await f.read()
     return FileContent(path=path, content=content)
+
+
+@router.get("/download")
+async def download_file(
+    agent_id: uuid.UUID,
+    path: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download / serve a file from the agent workspace (browser-friendly)."""
+    await check_agent_access(db, current_user, agent_id)
+    target = _safe_path(agent_id, path)
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    return FileResponse(path=str(target), filename=target.name)
 
 
 @router.put("/content")

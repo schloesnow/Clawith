@@ -15,6 +15,7 @@ The agent reads/writes these files directly. No per-concept tools needed.
 import json
 import os
 import uuid
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,6 +27,12 @@ from app.config import get_settings
 
 _settings = get_settings()
 WORKSPACE_ROOT = Path(_settings.AGENT_DATA_DIR)
+
+# ContextVar set by each channel handler so send_channel_file knows where to send
+# Value: async callable(file_path: Path) -> None  |  None for web chat (returns URL)
+channel_file_sender: ContextVar = ContextVar('channel_file_sender', default=None)
+# For web chat: agent_id needed to build download URL
+channel_web_agent_id: ContextVar = ContextVar('channel_web_agent_id', default=None)
 
 # ─── Tool Definitions (OpenAI function-calling format) ──────────
 
@@ -148,6 +155,27 @@ AGENT_TOOLS = [
                     },
                 },
                 "required": ["action", "title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_channel_file",
+            "description": "Send a file to the user via the current communication channel (Feishu, Slack, Discord, or web). Call this when you have created a file and the user would benefit from receiving it directly. Provide the workspace-relative file path (e.g. workspace/report.md).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Workspace-relative path to the file, e.g. workspace/report.md",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Optional message to accompany the file",
+                    },
+                },
+                "required": ["file_path"],
             },
         },
     },
@@ -532,6 +560,8 @@ async def execute_tool(
             result = await _send_feishu_message(agent_id, arguments)
         elif tool_name == "send_message_to_agent":
             result = await _send_message_to_agent(agent_id, arguments)
+        elif tool_name == "send_channel_file":
+            result = await _send_channel_file(agent_id, ws, arguments)
         elif tool_name == "web_search":
             result = await _web_search(arguments)
         elif tool_name == "jina_search":
@@ -826,6 +856,50 @@ async def _search_bing(query: str, api_key: str, max_results: int, language: str
     if not results:
         return f'🔍 No results found for "{query}"'
     return f'🔍 Bing search for "{query}" ({len(results)} items):\n\n' + "\n\n---\n\n".join(results)
+
+
+async def _send_channel_file(agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:
+    """Send a file to the user via the current channel or return a download URL for web chat."""
+    rel_path = arguments.get("file_path", "").strip()
+    accompany_msg = arguments.get("message", "")
+    if not rel_path:
+        return "❌ file_path is required"
+
+    # Resolve file path within agent workspace
+    file_path = (ws / rel_path).resolve()
+    ws_resolved = ws.resolve()
+    if not str(file_path).startswith(str(ws_resolved)):
+        # Also allow workspace/ prefix pointing to same location
+        file_path = (WORKSPACE_ROOT / str(agent_id) / rel_path).resolve()
+        if not file_path.exists():
+            return f"❌ File not found: {rel_path}"
+    if not file_path.exists():
+        return f"❌ File not found: {rel_path}"
+
+    sender = channel_file_sender.get()
+    if sender is not None:
+        # Channel mode: call the channel-specific send function
+        try:
+            await sender(file_path, accompany_msg)
+            return f"✅ File '{file_path.name}' sent to user via channel."
+        except Exception as e:
+            return f"❌ Failed to send file: {e}"
+    else:
+        # Web chat mode: return a download URL
+        aid = channel_web_agent_id.get() or str(agent_id)
+        base_abs = (WORKSPACE_ROOT / str(agent_id)).resolve()
+        try:
+            file_rel = str(file_path.resolve().relative_to(base_abs))
+        except ValueError:
+            file_rel = rel_path
+        from app.config import get_settings as _gs
+        _s = _gs()
+        base_url = getattr(_s, 'BASE_URL', '').rstrip('/') or ''
+        download_url = f"{base_url}/api/agents/{aid}/files/download?path={file_rel}"
+        msg = f"✅ File ready: [{file_path.name}]({download_url})"
+        if accompany_msg:
+            msg = accompany_msg + "\n\n" + msg
+        return msg
 
 
 async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None) -> str:

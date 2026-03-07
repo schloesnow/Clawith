@@ -211,5 +211,84 @@ class FeishuService:
         })
         return await self.send_message(app_id, app_secret, creator_open_id, "text", text_content)
 
+    async def download_message_resource(self, app_id: str, app_secret: str,
+                                         message_id: str, file_key: str,
+                                         resource_type: str = "file") -> bytes:
+        """Download a file or image from a Feishu message.
+
+        Args:
+            resource_type: "file" or "image"
+        Returns raw file bytes.
+        """
+        async with httpx.AsyncClient(timeout=30) as client:
+            token_resp = await client.post(FEISHU_APP_TOKEN_URL, json={
+                "app_id": app_id,
+                "app_secret": app_secret,
+            })
+            app_token = token_resp.json().get("app_access_token", "")
+            resp = await client.get(
+                f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/resources/{file_key}",
+                params={"type": resource_type},
+                headers={"Authorization": f"Bearer {app_token}"},
+            )
+            resp.raise_for_status()
+            return resp.content
+
+    async def upload_and_send_file(self, app_id: str, app_secret: str,
+                                    receive_id: str, file_path,
+                                    receive_id_type: str = "open_id",
+                                    accompany_msg: str = "") -> dict:
+        """Upload a local file to Feishu and send it as a file message.
+
+        Returns the send_message response dict.
+        """
+        import json as _json
+        from pathlib import Path as _Path
+        fp = _Path(file_path)
+        async with httpx.AsyncClient(timeout=60) as client:
+            # Get token
+            token_resp = await client.post(FEISHU_APP_TOKEN_URL, json={
+                "app_id": app_id, "app_secret": app_secret,
+            })
+            app_token = token_resp.json().get("app_access_token", "")
+            headers = {"Authorization": f"Bearer {app_token}"}
+
+            # Upload file
+            with open(fp, "rb") as f:
+                file_bytes = f.read()
+            # Determine file type for Feishu upload
+            ext = fp.suffix.lower()
+            feishu_file_type = "stream"  # generic binary
+            if ext in (".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".txt", ".md"):
+                feishu_file_type = "stream"
+            upload_resp = await client.post(
+                "https://open.feishu.cn/open-apis/im/v1/files",
+                files={"file": (fp.name, file_bytes, "application/octet-stream")},
+                data={"file_type": feishu_file_type, "file_name": fp.name},
+                headers=headers,
+            )
+            upload_data = upload_resp.json()
+            if upload_data.get("code") != 0:
+                raise RuntimeError(f"Feishu file upload failed: {upload_data.get('msg')}")
+            file_key = upload_data["data"]["file_key"]
+
+            # Send text accompany message first if provided
+            if accompany_msg:
+                await client.post(
+                    f"{FEISHU_SEND_MSG_URL}?receive_id_type={receive_id_type}",
+                    json={"receive_id": receive_id, "msg_type": "text",
+                          "content": _json.dumps({"text": accompany_msg})},
+                    headers=headers,
+                )
+
+            # Send file message
+            resp = await client.post(
+                f"{FEISHU_SEND_MSG_URL}?receive_id_type={receive_id_type}",
+                json={"receive_id": receive_id, "msg_type": "file",
+                      "content": _json.dumps({"file_key": file_key})},
+                headers=headers,
+            )
+            return resp.json()
+
 
 feishu_service = FeishuService()
