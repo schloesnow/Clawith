@@ -6,6 +6,8 @@
   "nav": {
     "dashboard": "Dashboard",
     "myAgents": "My Digital Employees",
+    "myCreated": "Created by me",
+    "companyShared": "Company shared",
     "newAgent": "New Digital Employee",
     "enterprise": "Enterprise Settings",
     "language": "Language",

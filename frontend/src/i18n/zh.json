@@ -6,6 +6,8 @@
   "nav": {
     "dashboard": "仪表盘",
     "myAgents": "我的数字员工",
+    "myCreated": "我创建的",
+    "companyShared": "公司共用",
     "newAgent": "新建数字员工",
     "enterprise": "企业设置",
     "language": "语言",
