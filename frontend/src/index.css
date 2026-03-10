@@ -272,6 +272,12 @@ select {
   transition: border-color var(--transition-fast);
 }
 
+/* Theme-colored radio and checkbox */
+input[type="radio"],
+input[type="checkbox"] {
+  accent-color: var(--accent-primary);
+}
+
 input:focus,
 textarea:focus,
 select:focus {
@@ -571,6 +577,7 @@ select:focus {
 .metric-tooltip-trigger {
   position: relative;
 }
+
 .metric-tooltip {
   display: none;
   position: absolute;
@@ -583,12 +590,13 @@ select:focus {
   padding: 8px 12px;
   border-radius: 6px;
   border: 1px solid var(--border-subtle);
-  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   white-space: normal;
   width: 260px;
   z-index: 100;
   pointer-events: none;
 }
+
 .metric-tooltip-trigger:hover .metric-tooltip {
   display: block;
 }
@@ -1229,9 +1237,9 @@ select:focus {
 }
 
 .wizard-step.completed .wizard-step-number {
-  background: var(--success);
-  border-color: var(--success);
-  color: white;
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: var(--text-inverse);
 }
 
 .wizard-connector {
