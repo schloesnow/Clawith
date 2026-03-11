@@ -247,7 +247,8 @@
       "fileSupport": "支持上传 PDF、Word、Excel、TXT 等文件",
       "attachment": "附件",
       "uploadFailed": "上传失败",
-      "askAboutFile": "关于 {{name}} 的问题..."
+      "askAboutFile": "关于 {{name}} 的问题...",
+      "thinking": "思考中..."
     },
     "activityLog": {
       "title": "工作日志",

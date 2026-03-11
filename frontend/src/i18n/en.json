@@ -248,7 +248,8 @@
       "fileSupport": "Supports PDF, Word, Excel, TXT files",
       "attachment": "Attachment",
       "uploadFailed": "Upload failed",
-      "askAboutFile": "Ask about {{name}}..."
+      "askAboutFile": "Ask about {{name}}...",
+      "thinking": "Thinking..."
     },
     "activityLog": {
       "title": "Activity Log",
